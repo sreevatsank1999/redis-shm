@@ -92,6 +92,7 @@ static struct config {
     int latency_mode;
     int latency_dist_mode;
     int latency_history;
+    long long latency_sample_rate;
     int lru_test_mode;
     long long lru_test_sample_size;
     int cluster_mode;
@@ -503,6 +504,28 @@ static int cliSelect(void) {
     return REDIS_ERR;
 }
 
+static void tryToUseSharedMemory(redisContext *c) {
+    const char* err_prefix = "Could not initialize shared memory to Redis: ";
+    redisReply *reply = redisUseSharedMemory(c);
+    if (reply == NULL) {
+        if (c->err) {
+            fprintf(stderr,"%s%s\n",err_prefix,c->errstr);
+        } else {
+            fprintf(stderr,"%sBroken I/O.\n",err_prefix);
+        }
+    } else {
+        if (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1) {
+            /* OK, using shared memory. */
+        } else
+        if (reply->type == REDIS_REPLY_ERROR) {
+            fprintf(stderr,"%s%s\n",err_prefix,reply->str);
+        } else {
+            fprintf(stderr,"%sUnexpected reply type.\n",err_prefix);
+        }
+        freeReplyObject(reply);
+    }
+}
+
 /* Connect to the server. If force is not zero the connection is performed
  * even if there is already a connected socket. */
 static int cliConnect(int force) {
@@ -527,6 +550,8 @@ static int cliConnect(int force) {
             context = NULL;
             return REDIS_ERR;
         }
+
+        tryToUseSharedMemory(context);
 
         /* Set aggressive KEEP_ALIVE socket option in the Redis context socket
          * in order to prevent timeouts caused by the execution of long
@@ -950,6 +975,9 @@ static redisReply *reconnectingRedisCommand(redisContext *c, const char *fmt, ..
             c = redisConnect(config.hostip,config.hostport);
             usleep(1000000);
         }
+        if (tries > 0) {
+            tryToUseSharedMemory(c);
+        }
 
         va_start(ap,fmt);
         reply = redisvCommand(c,fmt,ap);
@@ -1015,6 +1043,8 @@ static int parseOptions(int argc, char **argv) {
         } else if (!strcmp(argv[i],"--latency-history")) {
             config.latency_mode = 1;
             config.latency_history = 1;
+        } else if (!strcmp(argv[i],"--latency-sample-rate") && !lastarg) {
+            config.latency_sample_rate = strtoll(argv[++i],NULL,10);
         } else if (!strcmp(argv[i],"--lru-test") && !lastarg) {
             config.lru_test_mode = 1;
             config.lru_test_sample_size = strtoll(argv[++i],NULL,10);
@@ -1123,6 +1153,8 @@ static void usage(void) {
 "                     Default time interval is 15 sec. Change it using -i.\n"
 "  --latency-dist     Shows latency as a spectrum, requires xterm 256 colors.\n"
 "                     Default time interval is 1 sec. Change it using -i.\n"
+"  --latency-sample-rate <us> Sleep time between ping commands in latency mode.\n"
+"                     Default time is 10000us.\n"
 "  --lru-test <keys>  Simulate a cache workload with an 80-20 distribution.\n"
 "  --slave            Simulate a slave showing commands received from the master.\n"
 "  --rdb <filename>   Transfer an RDB dump from remote server to local file.\n"
@@ -1344,7 +1376,7 @@ static void repl(void) {
 
                     elapsed = mstime()-start_time;
                     if (elapsed >= 500) {
-                        printf("(%.2fs)\n",(double)elapsed/1000);
+                        printf("(%.3fs)\n",(double)elapsed/1000);
                     }
                 }
             }
@@ -1460,26 +1492,29 @@ static int evalMode(int argc, char **argv) {
  * Latency and latency history modes
  *--------------------------------------------------------------------------- */
 
-#define LATENCY_SAMPLE_RATE 10 /* milliseconds. */
-#define LATENCY_HISTORY_DEFAULT_INTERVAL 15000 /* milliseconds. */
+#define LATENCY_DEFAULT_SAMPLE_RATE 10000 /* microseconds. */
+#define LATENCY_HISTORY_DEFAULT_INTERVAL 15000000 /* microseconds. */
 static void latencyMode(void) {
     redisReply *reply;
-    long long start, latency, min = 0, max = 0, tot = 0, count = 0;
+    long long start, latency, min = 0, max = 0, tot = 0, count = 0, last_output = 0;
     long long history_interval =
-        config.interval ? config.interval/1000 :
+        config.interval ? config.interval :
                           LATENCY_HISTORY_DEFAULT_INTERVAL;
+    long long sample_rate =
+        config.latency_sample_rate >= 0 ? config.latency_sample_rate :
+                                          LATENCY_DEFAULT_SAMPLE_RATE;
     double avg;
-    long long history_start = mstime();
+    long long history_start = ustime();
 
     if (!context) exit(1);
     while(1) {
-        start = mstime();
+        start = ustime();
         reply = reconnectingRedisCommand(context,"PING");
         if (reply == NULL) {
             fprintf(stderr,"\nI/O error\n");
             exit(1);
         }
-        latency = mstime()-start;
+        latency = ustime()-start;
         freeReplyObject(reply);
         count++;
         if (count == 1) {
@@ -1491,16 +1526,21 @@ static void latencyMode(void) {
             tot += latency;
             avg = (double) tot/count;
         }
-        printf("\x1b[0G\x1b[2Kmin: %lld, max: %lld, avg: %.2f (%lld samples)",
-            min, max, avg, count);
-        fflush(stdout);
-        if (config.latency_history && mstime()-history_start > history_interval)
-        {
-            printf(" -- %.2f seconds range\n", (float)(mstime()-history_start)/1000);
-            history_start = mstime();
+        int history_reset = (config.latency_history && start+latency-history_start > history_interval);
+        if (history_reset || start-last_output > 50000) { /* avoid abusing the output */
+            printf("\x1b[0G\x1b[2Kmin: %.3f, max: %.3f, avg: %.3f (%lld samples)",
+                (float)min/1000, (float)max/1000, avg/1000, count);
+            fflush(stdout);
+            last_output = start + latency;
+        }
+        if (history_reset) {
+            printf(" -- %.3f seconds range\n", (float)(ustime()-history_start)/1000000);
+            history_start = ustime();
             min = max = tot = count = 0;
         }
-        usleep(LATENCY_SAMPLE_RATE * 1000);
+        if (sample_rate > 0) {
+            usleep(sample_rate);
+        }
     }
 }
 
@@ -1554,18 +1594,18 @@ void showLatencyDistSamples(struct distsamples *samples, long long tot) {
 void showLatencyDistLegend(void) {
     int j;
 
-    printf("---------------------------------------------\n");
-    printf(". - * #          .01 .125 .25 .5 milliseconds\n");
-    printf("1,2,3,...,9      from 1 to 9     milliseconds\n");
-    printf("A,B,C,D,E        10,20,30,40,50  milliseconds\n");
-    printf("F,G,H,I,J        .1,.2,.3,.4,.5       seconds\n");
-    printf("K,L,M,N,O,P,Q,?  1,2,4,8,16,30,60,>60 seconds\n");
+    printf("-----------------------------------------------------\n");
+    printf(". , \" - * #      .01 .02 0.5 .125 .25 .5 milliseconds\n");
+    printf("1,2,3,...,9      from 1 to 9             milliseconds\n");
+    printf("A,B,C,D,E        10,20,30,40,50          milliseconds\n");
+    printf("F,G,H,I,J        .1,.2,.3,.4,.5          seconds\n");
+    printf("K,L,M,N,O,P,Q,?  1,2,4,8,16,30,60,>60    seconds\n");
     printf("From 0 to 100%%: ");
     for (j = 0; j < spectrum_palette_size; j++) {
         printf("\033[48;5;%dm ", spectrum_palette[j]);
     }
     printf("\033[0m\n");
-    printf("---------------------------------------------\n");
+    printf("-----------------------------------------------------\n");
 }
 
 static void latencyDistMode(void) {
@@ -1574,6 +1614,9 @@ static void latencyDistMode(void) {
     long long history_interval =
         config.interval ? config.interval/1000 :
                           LATENCY_DIST_DEFAULT_INTERVAL;
+    long long sample_rate =
+        config.latency_sample_rate >= 0 ? config.latency_sample_rate :
+                                          LATENCY_DEFAULT_SAMPLE_RATE;
     long long history_start = ustime();
     int j, outputs = 0;
 
@@ -1582,6 +1625,8 @@ static void latencyDistMode(void) {
          * which are more interesting than others, like 1-10 milliseconds
          * range. */
         {10,0,'.'},         /* 0.01 ms */
+        {20,0,','},         /* 0.02 ms */
+        {50,0,'"'},         /* 0.05 ms */
         {125,0,'-'},        /* 0.125 ms */
         {250,0,'*'},        /* 0.25 ms */
         {500,0,'#'},        /* 0.5 ms */
@@ -1642,7 +1687,7 @@ static void latencyDistMode(void) {
             history_start = ustime();
             count = 0;
         }
-        usleep(LATENCY_SAMPLE_RATE * 1000);
+        usleep(sample_rate);
     }
 }
 
@@ -2135,7 +2180,7 @@ static void findBigKeys(void) {
 
             if(biggest[type]<sizes[i]) {
                 printf(
-                   "[%05.2f%%] Biggest %-6s found so far '%s' with %llu %s\n",
+                   "[%05.3f%%] Biggest %-6s found so far '%s' with %llu %s\n",
                    pct, typename[type], keys->element[i]->str, sizes[i],
                    typeunit[type]);
 
@@ -2152,7 +2197,7 @@ static void findBigKeys(void) {
 
             /* Update overall progress */
             if(sampled % 1000000 == 0) {
-                printf("[%05.2f%%] Sampled %llu keys so far\n", pct, sampled);
+                printf("[%05.3f%%] Sampled %llu keys so far\n", pct, sampled);
             }
         }
 
@@ -2171,7 +2216,7 @@ static void findBigKeys(void) {
     printf("\n-------- summary -------\n\n");
 
     printf("Sampled %llu keys in the keyspace!\n", sampled);
-    printf("Total key length in bytes is %llu (avg len %.2f)\n\n",
+    printf("Total key length in bytes is %llu (avg len %.3f)\n\n",
        totlen, totlen ? (double)totlen/sampled : 0);
 
     /* Output the biggest keys we found, for types we did find */
@@ -2185,7 +2230,7 @@ static void findBigKeys(void) {
     printf("\n");
 
     for(i=0;i<TYPE_NONE;i++) {
-        printf("%llu %ss with %llu %s (%05.2f%% of keys, avg size %.2f)\n",
+        printf("%llu %ss with %llu %s (%05.3f%% of keys, avg size %.3f)\n",
            counts[i], typename[i], totalsize[i], typeunit[i],
            sampled ? 100 * (double)counts[i]/sampled : 0,
            counts[i] ? (double)totalsize[i]/counts[i] : 0);
@@ -2251,13 +2296,13 @@ void bytesToHuman(char *s, long long n) {
         return;
     } else if (n < (1024*1024)) {
         d = (double)n/(1024);
-        sprintf(s,"%.2fK",d);
+        sprintf(s,"%.3fK",d);
     } else if (n < (1024LL*1024*1024)) {
         d = (double)n/(1024*1024);
-        sprintf(s,"%.2fM",d);
+        sprintf(s,"%.3fM",d);
     } else if (n < (1024LL*1024*1024*1024)) {
         d = (double)n/(1024LL*1024*1024);
-        sprintf(s,"%.2fG",d);
+        sprintf(s,"%.3fG",d);
     }
 }
 
@@ -2463,7 +2508,7 @@ static void LRUTestMode(void) {
         }
         /* Print stats. */
         printf(
-            "%lld Gets/sec | Hits: %lld (%.2f%%) | Misses: %lld (%.2f%%)\n",
+            "%lld Gets/sec | Hits: %lld (%.3f%%) | Misses: %lld (%.3f%%)\n",
             hits+misses,
             hits, (double)hits/(hits+misses)*100,
             misses, (double)misses/(hits+misses)*100);
@@ -2535,7 +2580,7 @@ static void intrinsicLatencyMode(void) {
         if (force_cancel_loop || end > test_end) {
             printf("\n%lld total runs "
                 "(avg latency: "
-                "%.4f microseconds / %.2f nanoseconds per run).\n",
+                "%.4f microseconds / %.3f nanoseconds per run).\n",
                 runs, avg_us, avg_ns);
             printf("Worst run took %.0fx longer than the average latency.\n",
                 max_latency / avg_us);
@@ -2564,6 +2609,7 @@ int main(int argc, char **argv) {
     config.latency_mode = 0;
     config.latency_dist_mode = 0;
     config.latency_history = 0;
+    config.latency_sample_rate = -1;
     config.lru_test_mode = 0;
     config.lru_test_sample_size = 0;
     config.cluster_mode = 0;
