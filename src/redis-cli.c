@@ -516,6 +516,10 @@ static void tryToUseSharedMemory(redisContext *c) {
     } else {
         if (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1) {
             /* OK, using shared memory. */
+            if (config.latency_mode || config.latency_dist_mode) {
+                printf("All communication with redis-server from now on "
+                       "uses shared memory.\n");
+            }
         } else
         if (reply->type == REDIS_REPLY_ERROR) {
             fprintf(stderr,"%s%s\n",err_prefix,reply->str);
