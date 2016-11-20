@@ -103,11 +103,17 @@ typedef struct redisAsyncContext {
 /* Functions that proxy to hiredis */
 redisAsyncContext *redisAsyncConnect(const char *ip, int port);
 redisAsyncContext *redisAsyncConnectBind(const char *ip, int port, const char *source_addr);
+redisAsyncContext *redisAsyncConnectBindWithReuse(const char *ip, int port,
+                                                  const char *source_addr);
 redisAsyncContext *redisAsyncConnectUnix(const char *path);
 int redisAsyncSetConnectCallback(redisAsyncContext *ac, redisConnectCallback *fn);
 int redisAsyncSetDisconnectCallback(redisAsyncContext *ac, redisDisconnectCallback *fn);
 void redisAsyncDisconnect(redisAsyncContext *ac);
 void redisAsyncFree(redisAsyncContext *ac);
+
+/* Use shared memory. These functions must be called immediately after connect. */
+int redisAsyncUseSharedMemory(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata);
+int redisAsyncUseSharedMemoryWithMode(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, mode_t mode);
 
 /* Handle read/write events */
 void redisAsyncHandleRead(redisAsyncContext *ac);
@@ -118,6 +124,7 @@ void redisAsyncHandleWrite(redisAsyncContext *ac);
 int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, const char *format, va_list ap);
 int redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, const char *format, ...);
 int redisAsyncCommandArgv(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, int argc, const char **argv, const size_t *argvlen);
+int redisAsyncFormattedCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, const char *cmd, size_t len);
 
 #ifdef __cplusplus
 }

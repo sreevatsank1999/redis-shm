@@ -1,5 +1,5 @@
-/* Extracted from anet.c to work properly with Hiredis error reporting.
- *
+/* Shared memory support for hiredis.
+ * 
  * Copyright (c) 2009-2011, Salvatore Sanfilippo <antirez at gmail dot com>
  * Copyright (c) 2010-2014, Pieter Noordhuis <pcnoordhuis at gmail dot com>
  * Copyright (c) 2015, Matt Stancliff <matt at genges dot com>,
@@ -32,22 +32,36 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __NET_H
-#define __NET_H
+#ifndef __SHM_H
+#define __SHM_H
 
-#include "hiredis.h"
+#include <unistd.h> /* ssize_t, etc */
+#include <semaphore.h> /* sem_t */
 
-#if defined(__sun)
-#define AF_LOCAL AF_UNIX
-#endif
+struct redisContext;
+struct redisReply;
 
-int redisCheckSocketError(redisContext *c);
-int redisContextSetTimeout(redisContext *c, const struct timeval tv);
-int redisContextConnectTcp(redisContext *c, const char *addr, int port, const struct timeval *timeout);
-int redisContextConnectBindTcp(redisContext *c, const char *addr, int port,
-                               const struct timeval *timeout,
-                               const char *source_addr);
-int redisContextConnectUnix(redisContext *c, const char *path, const struct timeval *timeout);
-int redisKeepAlive(redisContext *c, int interval);
+/* The shared memory file is created with these permissions, by default. */
+#define SHARED_MEMORY_DEFAULT_MODE 00700
 
-#endif
+/* Initializes the shared memory communication. In a non-blocking context,
+ * this only partially initializes, and needs to be completed by a call
+ * to sharedMemoryInitAfterReply. This call is implicit in a blocking context. */
+struct redisReply *sharedMemoryInit(struct redisContext *c, mode_t mode);
+void sharedMemoryInitAfterReply(struct redisContext *c, struct redisReply *reply);
+
+/* Formats the command sent by sharedMemoryInit. Only works after a successful
+ * call to sharedMemoryInit! */
+int sharedMemoryFormatShmOpen(struct redisContext *c, char **cmd);
+
+/* Returns true if the shared memory communication is completely initialized. */
+int sharedMemoryIsInitialized(struct redisContext *c);
+
+void sharedMemoryFree(struct redisContext *c);
+
+/* These act as write()/read(), with the same rules and returns and errno. */
+ssize_t sharedMemoryWrite(struct redisContext *c, char *buf, size_t btw);
+ssize_t sharedMemoryRead(struct redisContext *c, char *buf, size_t btr);
+
+
+#endif /* __SHM_H */
