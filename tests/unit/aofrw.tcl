@@ -41,15 +41,8 @@ start_server {tags {"aofrw"}} {
             stop_write_load $load_handle3
             stop_write_load $load_handle4
 
-            # Make sure that we remain the only connected client.
-            # This step is needed to make sure there are no pending writes
-            # that will be processed between the two "debug digest" calls.
-            wait_for_condition 50 100 {
-                [llength [split [string trim [r client list]] "\n"]] == 1
-            } else {
-                puts [r client list]
-                fail "Clients generating loads are not disconnecting"
-            }
+            # Make sure no more commands processed, before taking debug digest
+            wait_load_handlers_disconnected
 
             # Get the data set digest
             set d1 [r debug digest]
@@ -64,7 +57,7 @@ start_server {tags {"aofrw"}} {
     }
 }
 
-start_server {tags {"aofrw"}} {
+start_server {tags {"aofrw"} overrides {aof-use-rdb-preamble no}} {
     test {Turning off AOF kills the background writing child if any} {
         r config set appendonly yes
         waitForBgrewriteaof r
@@ -73,7 +66,7 @@ start_server {tags {"aofrw"}} {
         r config set appendonly no
         r exec
         wait_for_condition 50 100 {
-            [string match {*Killing*AOF*child*} [exec tail -n5 < [srv 0 stdout]]]
+            [string match {*Killing*AOF*child*} [exec tail -5 < [srv 0 stdout]]]
         } else {
             fail "Can't find 'Killing AOF child' into recent logs"
         }
